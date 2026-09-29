@@ -1,0 +1,43 @@
+# Builds one package set on Windows with MSYS2 and publishes it as a release named by its
+# version, which RaiGolmi's build-common.ps1 installs by URL. Run by hand, once per version.
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Which package set to build
+        type: choice
+        options: [qemu, virglrenderer]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: base-devel git
+
+      - name: Build
+        shell: msys2 {0}
+        run: bash ${{ inputs.package }}/build.sh out
+
+      # A release that already exists is refused: a version is built once, and a rebuild of it
+      # is a new pkgrel in build.sh, never a replaced download.
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = (Get-Content out/tag).Trim()
+          Add-Content out/notes "The patch and build script: https://github.com/${{ github.repository }}/tree/${{ github.sha }}/${{ inputs.package }}"
+          gh release create $tag (Get-ChildItem out/*.pkg.tar.zst).FullName --title $tag --notes-file out/notes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
