@@ -42,8 +42,15 @@ version="11.1.1-$rel.1"
 for pkg in qemu qemu-common qemu-guest-agent qemu-image-util; do
   cp "mingw-w64-ucrt-x86_64-$pkg-$version-any.pkg.tar.zst" "$out/"
 done
+# The complete corresponding source the packages are built from, as GPL-2.0 asks of whoever
+# hands out the binaries: the edited PKGBUILD with every file it names, QEMU's own tarball and
+# its signature among them, and this script.
+cp "$here/build.sh" raigolmi-build.sh
+tar --exclude=./src --exclude=./pkg --exclude='./*.pkg.tar.zst' --exclude='./*.log' \
+  --owner=0 --group=0 -czf "$out/mingw-w64-qemu-$version.src.tar.gz" \
+  --transform 's,^\.,mingw-w64-qemu,' .
 echo "qemu-$version" > "$out/tag"
 cat > "$out/notes" <<EOF
-MSYS2's mingw-w64-qemu $version for UCRT64: QEMU 11.1.1 (source: https://download.qemu.org/qemu-11.1.1.tar.xz, GPL-2.0), built from MSYS2's PKGBUILD at https://github.com/msys2/MINGW-packages/tree/$(git -C "$work/p" rev-parse HEAD)/mingw-w64-qemu, with qemu/004-file-win32-discard.patch and the edits in qemu/build.sh.
+MSYS2's mingw-w64-qemu $version for UCRT64: QEMU 11.1.1 (source: https://download.qemu.org/qemu-11.1.1.tar.xz, GPL-2.0), built from MSYS2's PKGBUILD at https://github.com/msys2/MINGW-packages/tree/$(git -C "$work/p" rev-parse HEAD)/mingw-w64-qemu, with qemu/004-file-win32-discard.patch and the edits in qemu/build.sh. The complete source it was built from is attached: mingw-w64-qemu-$version.src.tar.gz.
 EOF
 rm -rf "$work"

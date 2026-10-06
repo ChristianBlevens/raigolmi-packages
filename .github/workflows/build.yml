@@ -39,5 +39,5 @@ jobs:
         run: |
           $tag = (Get-Content out/tag).Trim()
           Add-Content out/notes "The patch and build script: https://github.com/${{ github.repository }}/tree/${{ github.sha }}/${{ inputs.package }}"
-          gh release create $tag (Get-ChildItem out/*.pkg.tar.zst).FullName --title $tag --notes-file out/notes
+          gh release create $tag (Get-ChildItem out/*.pkg.tar.zst, out/*.src.tar.gz).FullName --title $tag --notes-file out/notes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
