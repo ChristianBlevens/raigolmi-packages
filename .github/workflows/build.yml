@@ -1,5 +1,5 @@
 # Builds one package set on Windows with MSYS2 and publishes it as a release named by its
-# version, which RaiGolmi's build-common.ps1 installs by URL. Run by hand, once per version.
+# version, which RaiGolmi's common.ps1 installs by URL. Run by hand, once per version.
 name: build
 
 on:
@@ -8,7 +8,7 @@ on:
       package:
         description: Which package set to build
         type: choice
-        options: [qemu, virglrenderer]
+        options: [qemu, virglrenderer, virglrenderer-venus]
 
 permissions:
   contents: write
