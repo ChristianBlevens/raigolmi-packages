@@ -1,0 +1,126 @@
+diff --git a/src/virgl_util.h b/src/virgl_util.h
+--- a/src/virgl_util.h
++++ b/src/virgl_util.h
+@@ -65,10 +65,19 @@
+ 
+ bool equal_func(const void *key1, const void *key2);
+ 
++/* On Windows an eventfd is a manual-reset event's HANDLE value, not a CRT fd: the CRT
++ * cannot wrap an event (_open_osfhandle needs a file type, GetFileType fails on events with
++ * ERROR_INVALID_HANDLE), and handle values fit in an int (HandleToLong). Only the functions
++ * below use or close it; virgl_renderer_get_poll_fd hands out the same value.
++ */
+ bool has_eventfd(void);
+ int create_eventfd(unsigned int initval);
+ int write_eventfd(int fd, uint64_t val);
+ void flush_eventfd(int fd);
++void close_eventfd(int fd);
++#ifdef _WIN32
++void *eventfd_handle(int fd);
++#endif
+ 
+ /*
+  * Returns true once WINQ_DIAG=1 (or any non-empty, non-"0" value) has been
+diff --git a/src/virgl_util.c b/src/virgl_util.c
+--- a/src/virgl_util.c
++++ b/src/virgl_util.c
+@@ -110,10 +110,7 @@
+    HANDLE event = CreateEventA(NULL, TRUE, initval ? TRUE : FALSE, NULL);
+    if (!event)
+       return -1;
+-   int fd = _open_osfhandle((intptr_t)event, 0);
+-   if (fd < 0)
+-      CloseHandle(event);
+-   return fd;
++   return HandleToLong(event);
+ #else
+    (void)initval;
+    return -1;
+@@ -124,10 +121,7 @@
+ {
+ #ifdef _WIN32
+    (void)val;
+-   HANDLE event = (HANDLE)_get_osfhandle(fd);
+-   if (event == INVALID_HANDLE_VALUE)
+-      return -1;
+-   return SetEvent(event) ? 0 : -1;
++   return SetEvent(eventfd_handle(fd)) ? 0 : -1;
+ #else
+    const char *buf = (const char *)&val;
+    size_t count = sizeof(val);
+@@ -151,9 +145,7 @@
+ void flush_eventfd(int fd)
+ {
+ #ifdef _WIN32
+-   HANDLE event = (HANDLE)_get_osfhandle(fd);
+-   if (event != INVALID_HANDLE_VALUE)
+-      ResetEvent(event);
++   ResetEvent(eventfd_handle(fd));
+ #else
+     ssize_t len;
+     uint64_t value;
+@@ -163,6 +155,22 @@
+ #endif
+ }
+ 
++void close_eventfd(int fd)
++{
++#ifdef _WIN32
++   CloseHandle(eventfd_handle(fd));
++#else
++   close(fd);
++#endif
++}
++
++#ifdef _WIN32
++void *eventfd_handle(int fd)
++{
++   return LongToHandle(fd);
++}
++#endif
++
+ /*
+  * One-shot read of WINQ_DIAG. Treat any non-empty, non-"0" value as on.
+  * Other modules call this to short-circuit their own VIRGL_*_DIAG checks.
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -178,7 +178,7 @@
+ 
+    while (!ctx->sync_thread.stop) {
+ #ifdef _WIN32
+-      HANDLE event = (HANDLE)_get_osfhandle(ctx->sync_thread.fence_eventfd);
++      HANDLE event = eventfd_handle(ctx->sync_thread.fence_eventfd);
+       DWORD wait_ret = WaitForSingleObject(event, 100); /* 100ms timeout */
+       if (wait_ret == WAIT_FAILED) {
+          proxy_log("failed to wait on fence event");
+@@ -541,7 +541,7 @@
+          thrd_join(ctx->sync_thread.thread, NULL);
+       }
+ 
+-      os_close_fd(ctx->sync_thread.fence_eventfd);
++      close_eventfd(ctx->sync_thread.fence_eventfd);
+    }
+ 
+    if (ctx->shmem.ptr)
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -7466,7 +7466,7 @@
+ 
+    vrend_state.sync_thread = u_thread_create(thread_sync, NULL);
+    if (!vrend_state.sync_thread) {
+-      close(vrend_state.eventfd);
++      close_eventfd(vrend_state.eventfd);
+       vrend_state.eventfd = -1;
+       vrend_clicbs->destroy_gl_context_surfaceless(vrend_state.sync_context);
+       cnd_destroy(&vrend_state.fence_cond);
+@@ -7819,7 +7819,7 @@
+    vrend_state.finishing = true;
+ 
+    if (vrend_state.eventfd != -1) {
+-      close(vrend_state.eventfd);
++      close_eventfd(vrend_state.eventfd);
+       vrend_state.eventfd = -1;
+    }
+ 

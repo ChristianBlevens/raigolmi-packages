@@ -27,7 +27,11 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   the fork's in-process render server discards everything virglrenderer logs once Venus
   starts, and most of its failures return without a word; with the patch the server keeps
   writing to the log QEMU's process already has (`VIRGL_LOG_FILE`), and each failure on the
-  way from context creation to a blob names itself and its Windows error. The fork changes the OpenGL path as well,
+  way from context creation to a blob names itself and its Windows error. Two more repair the
+  fork: `005-eventfd-handle.patch` keeps its Windows eventfd as an event's handle value, since
+  the CRT cannot wrap an event in an fd and every Venus context failed to create its fence
+  eventfd; `006-cursor-top-down.patch` turns every cursor over as virglrenderer 1.3.0 does,
+  where the fork left non-`y_0_top` cursors upside down. The fork changes the OpenGL path as well,
   so it never replaces the default DLL: the package installs it into `/ucrt64/raigolmi-venus/`
   beside an unchanged copy of the patched QEMU's `qemu-system-x86_64w.exe`, and that copy loads
   the DLL beside it while `/ucrt64/bin` keeps the default one. RaiGolmi starts that copy only
