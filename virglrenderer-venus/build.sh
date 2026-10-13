@@ -14,7 +14,7 @@ git clone --depth 1 --filter=blob:none --sparse https://github.com/msys2/MINGW-p
 git -C "$work/p" sparse-checkout set mingw-w64-virglrenderer
 mkdir "$work/b"
 cp "$here/PKGBUILD" "$work/p/mingw-w64-virglrenderer/001-void-param.patch" \
-   "$here/../virglrenderer/003-d3d11-texture-optional.patch" "$work/b/"
+   "$here/../virglrenderer/003-d3d11-texture-optional.patch" "$here/004-venus-failure-log.patch" "$work/b/"
 cd "$work/b"
 
 # The QEMU it depends on is this repo's release, which no sync database has, so makepkg checks
@@ -37,6 +37,6 @@ bsdtar -tf "$pkg" | grep -qx ucrt64/raigolmi-venus/libvirglrenderer-1.dll \
 cp "$pkg" "$out/"
 echo "virglrenderer-venus-$version" > "$out/tag"
 cat > "$out/notes" <<EOF
-mingw-w64-virglrenderer-venus $version for UCRT64, installing into /ucrt64/raigolmi-venus: virglrenderer with Venus (MIT) from https://github.com/cmspam/winq-emu-virglrenderer/tree/$_commit, built with -Dvenus=true -Dvideo=false, with MSYS2's 001-void-param.patch from https://github.com/msys2/MINGW-packages/tree/$(git -C "$work/p" rev-parse HEAD)/mingw-w64-virglrenderer and virglrenderer/003-d3d11-texture-optional.patch; and qemu-system-x86_64w.exe from this repo's release qemu-$_qemu, unchanged (GPL-2.0), whose complete source is that release's mingw-w64-qemu-$_qemu.src.tar.gz.
+mingw-w64-virglrenderer-venus $version for UCRT64, installing into /ucrt64/raigolmi-venus: virglrenderer with Venus (MIT) from https://github.com/cmspam/winq-emu-virglrenderer/tree/$_commit, built with -Dvenus=true -Dvideo=false, with MSYS2's 001-void-param.patch from https://github.com/msys2/MINGW-packages/tree/$(git -C "$work/p" rev-parse HEAD)/mingw-w64-virglrenderer, virglrenderer/003-d3d11-texture-optional.patch and virglrenderer-venus/004-venus-failure-log.patch; and qemu-system-x86_64w.exe from this repo's release qemu-$_qemu, unchanged (GPL-2.0), whose complete source is that release's mingw-w64-qemu-$_qemu.src.tar.gz.
 EOF
 rm -rf "$work"

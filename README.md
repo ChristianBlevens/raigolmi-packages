@@ -23,7 +23,11 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
 - **virglrenderer-venus** (`virglrenderer-venus/`): Vulkan for the guest (Venus), for
   RaiGolmi's experimental Venus setting. It is virglrenderer from the
   [winq-emu fork](https://github.com/cmspam/winq-emu-virglrenderer), which ports Venus to
-  Windows, at a pinned commit, with patch 003 above. The fork changes the OpenGL path as well,
+  Windows, at a pinned commit, with patch 003 above and its own `004-venus-failure-log.patch`:
+  the fork's in-process render server discards everything virglrenderer logs once Venus
+  starts, and most of its failures return without a word; with the patch the server keeps
+  writing to the log QEMU's process already has (`VIRGL_LOG_FILE`), and each failure on the
+  way from context creation to a blob names itself and its Windows error. The fork changes the OpenGL path as well,
   so it never replaces the default DLL: the package installs it into `/ucrt64/raigolmi-venus/`
   beside an unchanged copy of the patched QEMU's `qemu-system-x86_64w.exe`, and that copy loads
   the DLL beside it while `/ucrt64/bin` keeps the default one. RaiGolmi starts that copy only

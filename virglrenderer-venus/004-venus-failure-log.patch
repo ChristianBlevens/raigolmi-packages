@@ -1,0 +1,712 @@
+diff --git a/src/mesa/util/anon_file.c b/src/mesa/util/anon_file.c
+index 2370f27e..2c0cc303 100644
+--- a/src/mesa/util/anon_file.c
++++ b/src/mesa/util/anon_file.c
+@@ -128,9 +128,14 @@ os_create_anonymous_file(off_t size, const char *debug_name)
+    char temp_path[MAX_PATH];
+    char temp_file[MAX_PATH];
+ 
++   /* Each failure returns with the failing call's error as the thread's last error. */
+    DWORD path_len = GetTempPathA(MAX_PATH, temp_path);
+-   if (!path_len || path_len >= MAX_PATH)
++   if (!path_len)
+       return -1;
++   if (path_len >= MAX_PATH) {
++      SetLastError(ERROR_BUFFER_OVERFLOW);
++      return -1;
++   }
+ 
+    UINT name_ret = GetTempFileNameA(temp_path,
+                                     (debug_name && debug_name[0]) ? debug_name : "vrg",
+@@ -146,7 +151,9 @@ os_create_anonymous_file(off_t size, const char *debug_name)
+                              FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+                              NULL);
+    if (file == INVALID_HANDLE_VALUE) {
++      const DWORD error = GetLastError();
+       DeleteFileA(temp_file);
++      SetLastError(error);
+       return -1;
+    }
+ 
+@@ -154,8 +161,10 @@ os_create_anonymous_file(off_t size, const char *debug_name)
+    file_size.QuadPart = size;
+    if (!SetFilePointerEx(file, file_size, NULL, FILE_BEGIN) ||
+        !SetEndOfFile(file)) {
++      const DWORD error = GetLastError();
+       CloseHandle(file);
+       DeleteFileA(temp_file);
++      SetLastError(error);
+       return -1;
+    }
+ 
+@@ -163,6 +172,8 @@ os_create_anonymous_file(off_t size, const char *debug_name)
+    if (fd < 0) {
+       CloseHandle(file);
+       DeleteFileA(temp_file);
++      /* _open_osfhandle reports through errno, not a Win32 error. */
++      SetLastError(ERROR_SUCCESS);
+       return -1;
+    }
+ 
+diff --git a/src/mman_win32.c b/src/mman_win32.c
+index 9462cef1..a183615f 100644
+--- a/src/mman_win32.c
++++ b/src/mman_win32.c
+@@ -110,6 +110,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fildes, intptr_t off
+       /* Usupported protection combinations */
+       || prot == PROT_EXEC) {
+       errno = EINVAL;
++      SetLastError(ERROR_INVALID_PARAMETER);
+       return MAP_FAILED;
+    }
+ 
+@@ -146,13 +147,15 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fildes, intptr_t off
+    } else {
+       map = MapViewOfFileEx(fm, desiredAccess, dwFileOffsetHigh, dwFileOffsetLow, len, addr);
+    }
++   const DWORD map_error = map ? 0 : GetLastError();
+ 
+    /* Only close fm if we created it (h != NULL means we own fm) */
+    if (h != NULL)
+       CloseHandle(fm);
+ 
+    if (map == NULL) {
+-      errno = __map_mman_error(GetLastError(), EPERM);
++      errno = __map_mman_error(map_error, EPERM);
++      SetLastError(map_error);
+       return MAP_FAILED;
+    }
+ 
+diff --git a/src/proxy/proxy_client.c b/src/proxy/proxy_client.c
+index ad79be95..9bf3a99d 100644
+--- a/src/proxy/proxy_client.c
++++ b/src/proxy/proxy_client.c
+@@ -37,25 +37,32 @@ proxy_client_create_context(struct proxy_client *client,
+    const size_t len = MIN2(ctx_name_len, sizeof(req.ctx_name) - 1);
+    memcpy(req.ctx_name, ctx_name, len);
+ 
+-   if (!proxy_socket_send_request(&client->socket, &req, sizeof(req)))
++   if (!proxy_socket_send_request(&client->socket, &req, sizeof(req))) {
++      proxy_log("context %u: sending CREATE_CONTEXT to the server failed", ctx_id);
+       return false;
++   }
+ 
+    struct render_client_op_create_context_reply reply;
+    int fd_count;
+    int ctx_fd;
+    if (!proxy_socket_receive_reply_with_fds(&client->socket, &reply, sizeof(reply),
+-                                            &ctx_fd, 1, &fd_count))
++                                            &ctx_fd, 1, &fd_count)) {
++      proxy_log("context %u: receiving the server's CREATE_CONTEXT reply failed", ctx_id);
+       return false;
++   }
+ 
+    if (reply.ok != fd_count) {
++      proxy_log("context %u: server replied ok=%d with %d fds", ctx_id, reply.ok, fd_count);
+       if (fd_count)
+          close(ctx_fd);
+       return false;
+    } else if (!reply.ok) {
++      proxy_log("context %u: server refused the context", ctx_id);
+       return false;
+    }
+ 
+    if (!proxy_socket_is_valid(ctx_fd)) {
++      proxy_log("context %u: server's context fd %d is not a socket", ctx_id, ctx_fd);
+       close(ctx_fd);
+       return false;
+    }
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+index c6b6d819..af2a84d8 100644
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -600,7 +600,7 @@ proxy_context_init_fencing(struct proxy_context *ctx)
+ 
+    ctx->sync_thread.fence_eventfd = create_eventfd(0);
+    if (ctx->sync_thread.fence_eventfd < 0) {
+-      proxy_log("failed to create fence eventfd");
++      proxy_log("failed to create fence eventfd: os error %lu", virgl_os_error());
+       return false;
+    }
+ 
+@@ -638,19 +638,27 @@ static int
+ alloc_memfd(const char *name, size_t size, void **out_ptr)
+ {
+    int fd = os_create_anonymous_file(size, name);
+-   if (fd < 0)
++   if (fd < 0) {
++      proxy_log("%s: os_create_anonymous_file(%zu) failed: os error %lu, errno %d", name,
++                size, virgl_os_error(), errno);
+       return -1;
++   }
+ 
+    int ret = add_required_seals_to_fd(fd);
+-   if (ret)
++   if (ret) {
++      proxy_log("%s: sealing fd %d failed: os error %lu", name, fd, virgl_os_error());
+       goto fail;
++   }
+ 
+    if (!out_ptr)
+       return fd;
+ 
+    void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+-   if (ptr == MAP_FAILED)
++   if (ptr == MAP_FAILED) {
++      proxy_log("%s: mmap of fd %d (%zu bytes) failed: os error %lu", name, fd, size,
++                virgl_os_error());
+       goto fail;
++   }
+ 
+    *out_ptr = ptr;
+    return fd;
+@@ -721,6 +729,7 @@ proxy_context_create(uint32_t ctx_id,
+ 
+    ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
++      proxy_log("context %u: out of memory", ctx_id);
+       os_close_fd(ctx_fd);
+       return NULL;
+    }
+@@ -735,6 +744,7 @@ proxy_context_create(uint32_t ctx_id,
+    ctx->sync_thread.fence_eventfd = -1;
+ 
+    if (!proxy_context_init(ctx, ctx_flags)) {
++      proxy_log("context %u: init failed", ctx_id);
+       proxy_context_destroy(&ctx->base);
+       return NULL;
+    }
+diff --git a/src/proxy/proxy_server.c b/src/proxy/proxy_server.c
+index c97d8cbf..e0caef73 100644
+--- a/src/proxy/proxy_server.c
++++ b/src/proxy/proxy_server.c
+@@ -215,16 +215,8 @@ server_retire_fence_cb(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id)
+    mtx_unlock(&state->workers_mutex);
+ }
+ 
+-static void
+-server_cb_debug_logger(UNUSED enum virgl_log_level_flags log_level,
+-                       const char *message,
+-                       UNUSED void *user_data)
+-{
+-   (void)message;
+-}
+-
++/* No debug_logger: the server runs inside the host process and logs through its logger. */
+ static const struct vkr_renderer_callbacks server_vkr_cbs = {
+-   .debug_logger = server_cb_debug_logger,
+    .retire_fence = server_retire_fence_cb,
+ };
+ 
+@@ -283,21 +275,33 @@ server_context_worker_thread(void *arg)
+           */
+          uint32_t init_flags;
+          size_t init_shmem_size;
+-         if (!server_recv_all(w->socket_fd, &init_flags, sizeof(init_flags)))
++         if (!server_recv_all(w->socket_fd, &init_flags, sizeof(init_flags))) {
++            proxy_log("server worker %u: INIT: receiving flags failed: WSA error %d",
++                      w->ctx_id, WSAGetLastError());
+             goto done;
+-         if (!server_recv_all(w->socket_fd, &init_shmem_size, sizeof(init_shmem_size)))
++         }
++         if (!server_recv_all(w->socket_fd, &init_shmem_size, sizeof(init_shmem_size))) {
++            proxy_log("server worker %u: INIT: receiving shmem size failed: WSA error %d",
++                      w->ctx_id, WSAGetLastError());
+             goto done;
++         }
+ 
+          int fds[2];
+          uint32_t fd_count = 0;
+-         if (!server_recv_all(w->socket_fd, &fd_count, sizeof(fd_count)))
++         if (!server_recv_all(w->socket_fd, &fd_count, sizeof(fd_count))) {
++            proxy_log("server worker %u: INIT: receiving fd count failed: WSA error %d",
++                      w->ctx_id, WSAGetLastError());
+             goto done;
++         }
+          if (fd_count < 1 || fd_count > 2) {
+             proxy_log("server worker: bad fd count %u for INIT", fd_count);
+             goto done;
+          }
+-         if (!server_recv_all(w->socket_fd, fds, sizeof(int) * fd_count))
++         if (!server_recv_all(w->socket_fd, fds, sizeof(int) * fd_count)) {
++            proxy_log("server worker %u: INIT: receiving fds failed: WSA error %d",
++                      w->ctx_id, WSAGetLastError());
+             goto done;
++         }
+ 
+          w->shmem_fd = fds[0];
+          w->fence_eventfd = (fd_count >= 2) ? fds[1] : -1;
+@@ -310,6 +314,10 @@ server_context_worker_thread(void *arg)
+          w->shmem_ptr = mmap(NULL, w->shmem_size, PROT_READ | PROT_WRITE,
+                              MAP_SHARED, w->shmem_fd, 0);
+          if (w->shmem_ptr == MAP_FAILED) {
++            proxy_log("server worker %u: INIT: mapping shmem fd %d (%zu bytes) failed: "
++                      "error %lu",
++                      w->ctx_id, w->shmem_fd, w->shmem_size, GetLastError());
++            w->shmem_ptr = NULL;
+             goto done;
+          }
+          w->timeline_seqnos = (atomic_uint *)w->shmem_ptr;
+@@ -416,6 +424,8 @@ server_context_worker_thread(void *arg)
+          mtx_unlock(&state->renderer_mutex);
+ 
+          if (!ok || res_fd < 0) {
++            proxy_log("server worker %u: create resource %u (blob %" PRIu64 ") failed",
++                      w->ctx_id, res_id, blob_id);
+             reply.fd_type = VIRGL_RESOURCE_FD_INVALID;
+             server_send_reply(w->socket_fd, &reply, sizeof(reply));
+          } else {
+@@ -536,6 +546,7 @@ server_main_thread(void *arg)
+          /* Create socketpair for worker <-> proxy_context */
+          int socket_fds[2];
+          if (!proxy_socket_pair(socket_fds)) {
++            proxy_log("server thread: context %u: socket pair failed", ctx_body.ctx_id);
+             struct render_client_op_create_context_reply reply = { .ok = false };
+             server_send_reply_with_fds(state->socket_fd, &reply, sizeof(reply),
+                                        NULL, 0);
+@@ -544,6 +555,7 @@ server_main_thread(void *arg)
+ 
+          struct server_context_worker *w = calloc(1, sizeof(*w));
+          if (!w) {
++            proxy_log("server thread: context %u: out of memory", ctx_body.ctx_id);
+             closesocket((SOCKET)socket_fds[0]);
+             closesocket((SOCKET)socket_fds[1]);
+             struct render_client_op_create_context_reply reply = { .ok = false };
+@@ -643,7 +655,7 @@ proxy_server_create_thread(struct proxy_server *srv)
+ 
+    int socket_fds[2];
+    if (!proxy_socket_pair(socket_fds)) {
+-      server_dbgf("proxy_server_create_thread: socket_pair failed\n");
++      proxy_log("server: socket pair failed");
+       return false;
+    }
+    server_dbgf("proxy_server_create_thread: socket_pair OK fds=%d,%d\n",
+@@ -651,6 +663,7 @@ proxy_server_create_thread(struct proxy_server *srv)
+ 
+    struct server_thread_state *state = calloc(1, sizeof(*state));
+    if (!state) {
++      proxy_log("server: out of memory");
+       closesocket((SOCKET)socket_fds[0]);
+       closesocket((SOCKET)socket_fds[1]);
+       return false;
+@@ -748,8 +761,10 @@ proxy_server_create(void)
+ {
+    server_dbgf("proxy_server_create called\n");
+    struct proxy_server *srv = calloc(1, sizeof(*srv));
+-   if (!srv)
++   if (!srv) {
++      proxy_log("server: out of memory");
+       return NULL;
++   }
+ 
+ #ifndef _WIN32
+    srv->pid = -1;
+diff --git a/src/proxy/proxy_socket.c b/src/proxy/proxy_socket.c
+index 63c50829..522d5d49 100644
+--- a/src/proxy/proxy_socket.c
++++ b/src/proxy/proxy_socket.c
+@@ -30,11 +30,17 @@ bool
+ proxy_socket_pair(int out_fds[static 2])
+ {
+    WSADATA wsa;
+-   WSAStartup(MAKEWORD(2, 2), &wsa);
++   const int startup_error = WSAStartup(MAKEWORD(2, 2), &wsa);
++   if (startup_error) {
++      proxy_log("socket pair: WSAStartup failed: error %d", startup_error);
++      return false;
++   }
+ 
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+-   if (listener == INVALID_SOCKET)
++   if (listener == INVALID_SOCKET) {
++      proxy_log("socket pair: listener socket failed: WSA error %d", WSAGetLastError());
+       return false;
++   }
+ 
+    struct sockaddr_in addr = {
+       .sin_family = AF_INET,
+@@ -44,29 +50,40 @@ proxy_socket_pair(int out_fds[static 2])
+ 
+    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) ||
+        listen(listener, 1)) {
++      proxy_log("socket pair: bind/listen on loopback failed: WSA error %d",
++                WSAGetLastError());
+       closesocket(listener);
+       return false;
+    }
+ 
+    int addrlen = sizeof(addr);
+-   getsockname(listener, (struct sockaddr *)&addr, &addrlen);
++   if (getsockname(listener, (struct sockaddr *)&addr, &addrlen)) {
++      proxy_log("socket pair: getsockname failed: WSA error %d", WSAGetLastError());
++      closesocket(listener);
++      return false;
++   }
+ 
+    SOCKET client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (client == INVALID_SOCKET) {
++      proxy_log("socket pair: client socket failed: WSA error %d", WSAGetLastError());
+       closesocket(listener);
+       return false;
+    }
+ 
+    if (connect(client, (struct sockaddr *)&addr, sizeof(addr))) {
++      proxy_log("socket pair: connect to loopback port %u failed: WSA error %d",
++                ntohs(addr.sin_port), WSAGetLastError());
+       closesocket(client);
+       closesocket(listener);
+       return false;
+    }
+ 
+    SOCKET server = accept(listener, NULL, NULL);
++   const int accept_error = server == INVALID_SOCKET ? WSAGetLastError() : 0;
+    closesocket(listener);
+ 
+    if (server == INVALID_SOCKET) {
++      proxy_log("socket pair: accept failed: WSA error %d", accept_error);
+       closesocket(client);
+       return false;
+    }
+diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
+index a79fe2f1..b0fdec16 100644
+--- a/src/venus/vkr_context.c
++++ b/src/venus/vkr_context.c
+@@ -290,17 +290,24 @@ vkr_context_create_resource_from_shm(struct vkr_context *ctx,
+    assert(!vkr_context_get_resource(ctx, res_id));
+ 
+    int fd = os_create_anonymous_file(blob_size, "vkr-shmem");
+-   if (fd < 0)
++   if (fd < 0) {
++      vkr_log("shm resource %u: os_create_anonymous_file(%" PRIu64
++              ") failed: os error %lu, errno %d",
++              res_id, blob_size, virgl_os_error(), errno);
+       return false;
++   }
+ 
+    void *mmap_ptr = mmap(NULL, blob_size, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
+    if (mmap_ptr == MAP_FAILED) {
++      vkr_log("shm resource %u: mmap of %" PRIu64 " bytes failed: os error %lu", res_id,
++              blob_size, virgl_os_error());
+       os_close_fd(fd);
+       return false;
+    }
+ 
+    if (!vkr_context_import_resource_internal(ctx, res_id, blob_size,
+                                              VIRGL_RESOURCE_FD_SHM, -1, mmap_ptr)) {
++      vkr_log("shm resource %u: adding it to the context failed", res_id);
+       munmap(mmap_ptr, blob_size);
+       os_close_fd(fd);
+       return false;
+@@ -330,11 +337,14 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
+    struct vkr_device_memory *mem = likely(mem_entry) ? mem_entry->data : NULL;
+    mtx_unlock(&ctx->object_mutex);
+    if (!mem || mem->base.type != VK_OBJECT_TYPE_DEVICE_MEMORY) {
++      vkr_log("resource %u: blob %" PRIu64 " (flags 0x%x) names no VkDeviceMemory",
++              res_id, blob_id, blob_flags);
+       return false;
+    }
+ 
+    struct virgl_context_blob blob;
+    if (!vkr_device_memory_export_blob(mem, blob_size, blob_flags, &blob)) {
++      vkr_log("resource %u: exporting blob %" PRIu64 " failed", res_id, blob_id);
+       return false;
+    }
+ 
+@@ -683,11 +693,14 @@ vkr_context_create(uint32_t ctx_id,
+                    const char *debug_name)
+ {
+    struct vkr_context *ctx = calloc(1, sizeof(*ctx));
+-   if (!ctx)
++   if (!ctx) {
++      vkr_log("context %u: out of memory", ctx_id);
+       return NULL;
++   }
+ 
+    bool ret = vkr_library_load(&ctx->vulkan_library);
+    if (!ret) {
++      vkr_log("context %u: loading the Vulkan library failed", ctx_id);
+       free(ctx);
+       return NULL;
+    }
+@@ -695,8 +708,10 @@ vkr_context_create(uint32_t ctx_id,
+    ctx->ctx_id = ctx_id;
+    ctx->retire_fence = cb;
+    ctx->debug_name = malloc(debug_len + 1);
+-   if (!ctx->debug_name)
++   if (!ctx->debug_name) {
++      vkr_log("context %u: out of memory for its name", ctx_id);
+       goto err_debug_name;
++   }
+ 
+    memcpy(ctx->debug_name, debug_name, debug_len);
+    ctx->debug_name[debug_len] = '\0';
+@@ -712,35 +727,51 @@ vkr_context_create(uint32_t ctx_id,
+    ctx->on_worker_thread = false;
+ #endif
+ 
+-   if (!vkr_context_wait_ring_init(ctx))
++   if (!vkr_context_wait_ring_init(ctx)) {
++      vkr_log("context %u: wait ring init failed", ctx_id);
+       goto err_ctx_wait_ring_init;
++   }
+ 
+-   if (mtx_init(&ctx->object_mutex, mtx_plain) != thrd_success)
++   if (mtx_init(&ctx->object_mutex, mtx_plain) != thrd_success) {
++      vkr_log("context %u: object mutex init failed", ctx_id);
+       goto err_ctx_object_mutex;
++   }
+ 
+    ctx->object_table = _mesa_hash_table_create(NULL, vkr_hash_u64, vkr_key_u64_equal);
+-   if (!ctx->object_table)
++   if (!ctx->object_table) {
++      vkr_log("context %u: out of memory for the object table", ctx_id);
+       goto err_ctx_object_table;
++   }
+ 
+-   if (mtx_init(&ctx->resource_mutex, mtx_plain) != thrd_success)
++   if (mtx_init(&ctx->resource_mutex, mtx_plain) != thrd_success) {
++      vkr_log("context %u: resource mutex init failed", ctx_id);
+       goto err_ctx_resource_mutex;
++   }
+ 
+    ctx->resource_table =
+       _mesa_hash_table_create(NULL, _mesa_hash_u32, _mesa_key_u32_equal);
+-   if (!ctx->resource_table)
++   if (!ctx->resource_table) {
++      vkr_log("context %u: out of memory for the resource table", ctx_id);
+       goto err_ctx_resource_table;
++   }
+ 
+-   if (vkr_cs_decoder_init(&ctx->decoder, ctx))
++   if (vkr_cs_decoder_init(&ctx->decoder, ctx)) {
++      vkr_log("context %u: command decoder init failed", ctx_id);
+       goto err_cs_decoder_init;
++   }
+ 
+-   if (vkr_cs_encoder_init(&ctx->encoder, &ctx->cs_fatal_error))
++   if (vkr_cs_encoder_init(&ctx->encoder, &ctx->cs_fatal_error)) {
++      vkr_log("context %u: reply encoder init failed", ctx_id);
+       goto err_cs_encoder_init;
++   }
+ 
+    vkr_context_init_dispatch(ctx);
+    vkr_context_init_proc_table(ctx);
+ 
+-   if (mtx_init(&ctx->ring_mutex, mtx_plain) != thrd_success)
++   if (mtx_init(&ctx->ring_mutex, mtx_plain) != thrd_success) {
++      vkr_log("context %u: ring mutex init failed", ctx_id);
+       goto err_ctx_ring_mutex;
++   }
+ 
+    list_inithead(&ctx->rings);
+ 
+diff --git a/src/venus/vkr_library.c b/src/venus/vkr_library.c
+index 34257ab4..e3c00a92 100644
+--- a/src/venus/vkr_library.c
++++ b/src/venus/vkr_library.c
+@@ -57,6 +57,8 @@ vkr_library_load(struct vulkan_library *lib)
+    lib->GetInstanceProcAddr =
+       (PFN_vkGetInstanceProcAddr)GetProcAddress(lib->handle, "vkGetInstanceProcAddr");
+ #pragma GCC diagnostic pop
++   if (lib->GetInstanceProcAddr == NULL)
++      vkr_log("vulkan-1.dll has no vkGetInstanceProcAddr: error %lu", GetLastError());
+ 
+ #else /* !_WIN32 */
+    lib->handle = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+diff --git a/src/venus/vkr_renderer.c b/src/venus/vkr_renderer.c
+index c43a96e6..c9566e57 100644
+--- a/src/venus/vkr_renderer.c
++++ b/src/venus/vkr_renderer.c
+@@ -69,7 +69,9 @@ vkr_renderer_init(uint32_t flags, const struct vkr_renderer_callbacks *cbs)
+       return false;
+ 
+    vkr_debug_init();
+-   virgl_log_set_handler(cbs->debug_logger, NULL, NULL);
++   /* NULL keeps the process's installed logger: an in-process server shares its host's. */
++   if (cbs->debug_logger)
++      virgl_log_set_handler(cbs->debug_logger, NULL, NULL);
+ 
+    vkr_state.cbs = cbs;
+    list_inithead(&vkr_state.contexts);
+@@ -111,17 +113,24 @@ vkr_renderer_create_context(uint32_t ctx_id,
+    assert(!(ctx_flags & ~VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK));
+ 
+    if ((ctx_flags & VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK) !=
+-       VIRTGPU_DRM_CAPSET_VENUS)
++       VIRTGPU_DRM_CAPSET_VENUS) {
++      vkr_log("context %u: capset %u is not venus", ctx_id,
++              ctx_flags & VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK);
+       return false;
++   }
+ 
+    /* duplicate ctx creation between server and vkr is invalid */
+    struct vkr_context *ctx = vkr_renderer_lookup_context(ctx_id);
+-   if (ctx)
++   if (ctx) {
++      vkr_log("context %u: already exists", ctx_id);
+       return false;
++   }
+ 
+    ctx = vkr_context_create(ctx_id, vkr_state.cbs->retire_fence, nlen, name);
+-   if (!ctx)
++   if (!ctx) {
++      vkr_log("context %u: vkr_context_create failed", ctx_id);
+       return false;
++   }
+ 
+    list_addtail(&ctx->head, &vkr_state.contexts);
+ 
+@@ -186,12 +195,17 @@ vkr_renderer_create_resource(uint32_t ctx_id,
+    assert(blob_size);
+ 
+    struct vkr_context *ctx = vkr_renderer_lookup_context(ctx_id);
+-   if (!ctx)
++   if (!ctx) {
++      vkr_log("create resource %u: no context %u", res_id, ctx_id);
+       return false;
++   }
+ 
+    struct virgl_context_blob blob;
+-   if (!vkr_context_create_resource(ctx, res_id, blob_id, blob_size, blob_flags, &blob))
++   if (!vkr_context_create_resource(ctx, res_id, blob_id, blob_size, blob_flags, &blob)) {
++      vkr_log("create resource %u: blob %" PRIu64 " size %" PRIu64 " flags 0x%x failed",
++              res_id, blob_id, blob_size, blob_flags);
+       return false;
++   }
+ 
+    assert(blob.type == VIRGL_RESOURCE_FD_SHM || blob.type == VIRGL_RESOURCE_FD_DMABUF ||
+           blob.type == VIRGL_RESOURCE_FD_OPAQUE);
+diff --git a/src/virgl_util.c b/src/virgl_util.c
+index be2903f4..83d6076b 100644
+--- a/src/virgl_util.c
++++ b/src/virgl_util.c
+@@ -273,10 +273,24 @@ void virgl_default_logger(UNUSED enum virgl_log_level_flags log_level,
+    if (log_level < virgl_log_level)
+       return;
+ 
+-   fprintf(fp, "%s", message);
++   /* Callers write messages with and without a trailing newline; each ends one line. */
++   size_t len = strlen(message);
++   if (len && message[len - 1] == '\n')
++      fprintf(fp, "%s", message);
++   else
++      fprintf(fp, "%s\n", message);
+    fflush(fp);
+ }
+ 
++unsigned long virgl_os_error(void)
++{
++#ifdef _WIN32
++   return GetLastError();
++#else
++   return (unsigned long)errno;
++#endif
++}
++
+ void virgl_override_log_level(enum virgl_log_level_flags log_level)
+ {
+    virgl_log_level = log_level;
+diff --git a/src/virgl_util.h b/src/virgl_util.h
+index a4fb7c74..2b849cf1 100644
+--- a/src/virgl_util.h
++++ b/src/virgl_util.h
+@@ -77,6 +77,9 @@ void flush_eventfd(int fd);
+  */
+ bool virgl_winq_diag_enabled(void);
+ 
++/* The calling thread's last OS error: GetLastError() on Windows, errno elsewhere. */
++unsigned long virgl_os_error(void);
++
+ void virgl_override_log_level(enum virgl_log_level_flags log_level);
+ void virgl_log_set_handler(virgl_log_callback_type log_cb,
+                            void *user_data,
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index d2f928e3..7bc6a123 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -223,16 +223,25 @@ int virgl_renderer_context_create_with_flags(uint32_t ctx_id,
+    TRACE_FUNC();
+ 
+    /* user context id must be greater than 0 */
+-   if (ctx_id == 0)
++   if (ctx_id == 0) {
++      virgl_error("context create: id 0\n");
+       return EINVAL;
++   }
+ 
+    /* unsupported flags */
+-   if (ctx_flags & ~VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK)
++   if (ctx_flags & ~VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK) {
++      virgl_error("context %u create: unsupported flags 0x%x\n", ctx_id, ctx_flags);
+       return EINVAL;
++   }
+ 
+    ctx = virgl_context_lookup(ctx_id);
+    if (ctx) {
+-      return ctx->capset_id == capset_id ? 0 : EINVAL;
++      if (ctx->capset_id != capset_id) {
++         virgl_error("context %u create: exists with capset %u, asked %u\n", ctx_id,
++                     ctx->capset_id, capset_id);
++         return EINVAL;
++      }
++      return 0;
+    }
+ 
+    switch (capset_id) {
+@@ -244,6 +253,8 @@ int virgl_renderer_context_create_with_flags(uint32_t ctx_id,
+       break;
+    case VIRTGPU_DRM_CAPSET_VENUS:
+       if (!state.proxy_initialized) {
++         virgl_error("context %u create: venus asked, but the render server is not "
++                     "initialized\n", ctx_id);
+          return EINVAL;
+       }
+       ctx = proxy_context_create(ctx_id, ctx_flags, nlen, name);
+@@ -257,11 +268,15 @@ int virgl_renderer_context_create_with_flags(uint32_t ctx_id,
+          ctx = drm_renderer_create(nlen, name, -1);
+       break;
+    default:
++      virgl_error("context %u create: unknown capset %u\n", ctx_id, capset_id);
+       return EINVAL;
+       break;
+    }
+-   if (!ctx)
++   if (!ctx) {
++      virgl_error("context %u create: capset %u context creation failed\n", ctx_id,
++                  capset_id);
+       return ENOMEM;
++   }
+ 
+    ctx->ctx_id = ctx_id;
+    ctx->in_fence_fd = -1;
+@@ -270,6 +285,7 @@ int virgl_renderer_context_create_with_flags(uint32_t ctx_id,
+ 
+    ret = virgl_context_add(ctx);
+    if (ret) {
++      virgl_error("context %u create: adding it failed: %d\n", ctx_id, ret);
+       ctx->destroy(ctx);
+       return ret;
+    }
+@@ -1214,12 +1230,20 @@ int virgl_renderer_resource_create_blob(const struct virgl_renderer_resource_cre
+    }
+ 
+    ctx = virgl_context_lookup(args->ctx_id);
+-   if (!ctx)
++   if (!ctx) {
++      virgl_error("resource %u create blob: no context %u\n", args->res_handle,
++                  args->ctx_id);
+       return -EINVAL;
++   }
+ 
+    ret = ctx->get_blob(ctx, args->res_handle, args->blob_id, args->size, args->blob_flags, &blob);
+-   if (ret)
++   if (ret) {
++      virgl_error("resource %u create blob: context %u get_blob(id %" PRIu64 ", size %" PRIu64
++                  ", flags 0x%x) failed: %d\n",
++                  args->res_handle, args->ctx_id, args->blob_id, args->size,
++                  args->blob_flags, ret);
+       return ret;
++   }
+ 
+    if (blob.type == VIRGL_RESOURCE_OPAQUE_HANDLE) {
+       assert(!(args->blob_flags & VIRGL_RENDERER_BLOB_FLAG_USE_SHAREABLE));
