@@ -1,0 +1,272 @@
+diff --git a/src/proxy/proxy_common.h b/src/proxy/proxy_common.h
+--- a/src/proxy/proxy_common.h
++++ b/src/proxy/proxy_common.h
+@@ -33,6 +33,8 @@ struct proxy_socket;
+ struct proxy_renderer {
+    const struct proxy_renderer_cbs *cbs;
+    uint32_t flags;
++   /* Read by the in-process render server on Windows; a forked one never sees it. */
++   bool dma_buf_importer;
+ 
+    struct proxy_server *server;
+    struct proxy_client *client;
+diff --git a/src/proxy/proxy_renderer.c b/src/proxy/proxy_renderer.c
+--- a/src/proxy/proxy_renderer.c
++++ b/src/proxy/proxy_renderer.c
+@@ -13,12 +13,15 @@
+ #include "vkr_renderer.h"
+ 
+ int
+-proxy_renderer_init(const struct proxy_renderer_cbs *cbs, uint32_t flags)
++proxy_renderer_init(const struct proxy_renderer_cbs *cbs,
++                    uint32_t flags,
++                    bool dma_buf_importer)
+ {
+    assert(flags & VIRGL_RENDERER_NO_VIRGL);
+ 
+    proxy_renderer.cbs = cbs;
+    proxy_renderer.flags = flags;
++   proxy_renderer.dma_buf_importer = dma_buf_importer;
+ 
+    proxy_renderer.server = proxy_server_create();
+    if (!proxy_renderer.server)
+diff --git a/src/proxy/proxy_renderer.h b/src/proxy/proxy_renderer.h
+--- a/src/proxy/proxy_renderer.h
++++ b/src/proxy/proxy_renderer.h
+@@ -6,6 +6,7 @@
+ #ifndef PROXY_RENDERER_H
+ #define PROXY_RENDERER_H
+ 
++#include <stdbool.h>
+ #include <stddef.h>
+ #include <stdint.h>
+ 
+@@ -18,8 +19,11 @@ struct proxy_renderer_cbs {
+ 
+ #ifdef ENABLE_RENDER_SERVER
+ 
++/* dma_buf_importer: this process's GL renderer imports the dma-bufs Venus exports. */
+ int
+-proxy_renderer_init(const struct proxy_renderer_cbs *cbs, uint32_t flags);
++proxy_renderer_init(const struct proxy_renderer_cbs *cbs,
++                    uint32_t flags,
++                    bool dma_buf_importer);
+ 
+ void
+ proxy_renderer_fini(void);
+@@ -39,7 +43,9 @@ proxy_context_create(uint32_t ctx_id,
+ #else /* ENABLE_RENDER_SERVER */
+ 
+ static inline int
+-proxy_renderer_init(UNUSED const struct proxy_renderer_cbs *cbs, UNUSED uint32_t flags)
++proxy_renderer_init(UNUSED const struct proxy_renderer_cbs *cbs,
++                    UNUSED uint32_t flags,
++                    UNUSED bool dma_buf_importer)
+ {
+    virgl_error("Render server support was not enabled in virglrenderer\n");
+    return -1;
+diff --git a/src/proxy/proxy_server.c b/src/proxy/proxy_server.c
+--- a/src/proxy/proxy_server.c
++++ b/src/proxy/proxy_server.c
+@@ -232,8 +232,9 @@ server_ensure_vkr_init(struct server_thread_state *state)
+ {
+    mtx_lock(&state->renderer_mutex);
+    if (!state->vkr_initialized) {
+-      static const uint32_t vkr_flags =
+-         VKR_RENDERER_THREAD_SYNC | VKR_RENDERER_ASYNC_FENCE_CB;
++      uint32_t vkr_flags = VKR_RENDERER_THREAD_SYNC | VKR_RENDERER_ASYNC_FENCE_CB;
++      if (proxy_renderer.dma_buf_importer)
++         vkr_flags |= VKR_RENDERER_DMA_BUF_IMPORTER;
+       server_dbgf("vkr_renderer_init flags=0x%x\n", vkr_flags);
+       if (!vkr_renderer_init(vkr_flags, &server_vkr_cbs)) {
+          mtx_unlock(&state->renderer_mutex);
+diff --git a/src/venus/vkr_common.h b/src/venus/vkr_common.h
+--- a/src/venus/vkr_common.h
++++ b/src/venus/vkr_common.h
+@@ -179,6 +179,8 @@ struct vkr_region {
+ };
+ 
+ extern uint32_t vkr_debug_flags;
++/* VKR_RENDERER_DMA_BUF_IMPORTER as vkr_renderer_init was given it */
++extern bool vkr_dma_buf_importer;
+ 
+ void
+ vkr_debug_init(void);
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -398,35 +398,15 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev)
+       }
+    }
+ 
+-   /* Synthesize Linux dma-buf + modifier extensions on Windows when we have
+-    * OPAQUE_WIN32 external memory to translate to. The host ICD has no
+-    * concept of dma-buf (a Linux kernel primitive), but guest consumers
+-    * (ANGLE Vulkan, Zink, Mesa EGL import) require the extensions to exist
+-    * before they will take zero-copy or dma-buf interop paths. We fulfill
+-    * the guest-visible contract by forcing LINEAR image tiling and mapping
+-    * DMA_BUF_BIT_EXT handle types to OPAQUE_WIN32_BIT inside vkr. LINEAR is
+-    * the only modifier we expose, which matches what a Windows host can
+-    * honestly describe across process boundaries.
++   /* Synthesize VK_EXT_external_memory_dma_buf + VK_EXT_image_drm_format_modifier, which guest
++    * zero-copy paths (ANGLE Vulkan, Zink, Mesa EGL import) require, translated to OPAQUE_WIN32
++    * memory and LINEAR tiling on the host ICD, only when the host GL renderer imports what this
++    * exports (vkr_dma_buf_importer). With the extension,
++    * Mesa's Venus WSI presents every window as a dma-buf the compositor imports through virgl
++    * (Mesa vn_wsi_init: sw_device only without it); vrend refuses that import when it has EGL
++    * but no GBM, which is every Windows build, and the refusal kills the compositor's context.
+     */
+-   /* Advertise VK_EXT_external_memory_dma_buf + VK_EXT_image_drm_format_modifier
+-    * to the guest and translate them to OPAQUE_WIN32 + LINEAR tiling on the
+-    * host Vulkan ICD.
+-    *
+-    * The missing piece that used to make this shim unusable — Wayland
+-    * compositors spinning forever when they tried to sample a Vulkan-exported
+-    * dma-buf as a GL texture — is now handled in vrend_renderer.c by
+-    * glImportMemoryWin32HandleEXT (GL_EXT_memory_object_win32). That lets
+-    * vrend's GL path import the Vulkan-exported NT HANDLE as a GL texture
+-    * with a real linear storage view, so kwin's EGLImage → GL texture
+-    * sampling produces valid pixels and the GL timer query actually
+-    * completes.
+-    *
+-    * Opt out with WINQ_DMABUF_SHIM_OFF=1 if the current test build regresses
+-    * for any workload; all the translation code stays in the binary either
+-    * way, so toggling is free.
+-    */
+-   if (physical_dev->host_external_memory_win32 &&
+-       getenv("WINQ_DMABUF_SHIM_OFF") == NULL) {
++   if (physical_dev->host_external_memory_win32 && vkr_dma_buf_importer) {
+       const bool had_dma_buf_from_host = physical_dev->EXT_external_memory_dma_buf;
+       if (!had_dma_buf_from_host &&
+           !vkr_physical_device_has_extension(exts, advertised_count,
+@@ -1122,25 +1102,11 @@ vkr_dispatch_vkGetPhysicalDeviceExternalBufferProperties(
+    struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
+ 
+ #ifdef _WIN32
+-   /* Report DMA_BUF as importable-only, never exportable.
+-    *
+-    * Rationale: on Linux hosts, a Vulkan-exported DMA_BUF fd refers to the
+-    * same kernel DRM BO that the GL stack can import and sample. On Windows
+-    * the Vulkan ICD allocates proprietary D3D-backed memory whose layout
+-    * virglrenderer's GL path cannot sample; if we advertise dma-buf export,
+-    * Mesa's Vulkan WSI Wayland path uses it for swapchain present, the
+-    * compositor imports the buffer as an EGLImage, GL sampling never
+-    * completes, and kwin spins forever in GLRenderTimeQuery::query()
+-    * (observed via gdb on a stuck kwin_wayland: drmIoctl
+-    * DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST at 5000+/sec).
+-    *
+-    * Reporting IMPORTABLE without EXPORTABLE keeps the extension useful
+-    * for VA-API / camera / capture dma-buf imports (the Chromium
+-    * VaapiVideoDecoder path) while forcing Mesa WSI to fall back to wl_shm
+-    * for swapchains — which is exactly the pre-shim behaviour that works.
+-    * A future virglrenderer with proper Vulkan↔GL host memory sharing
+-    * (WGL_NV_DX_interop2 or VK_EXT_external_memory_host) can flip this
+-    * back to exportable.
++   /* Report DMA_BUF buffers as importable, never exportable. This does not keep swapchains
++    * off dma-buf: Mesa 26.2's Venus presents through wl_shm only when the device lacks
++    * VK_EXT_external_memory_dma_buf (vn_wsi_init) and otherwise allocates dma-buf images,
++    * never asking about buffers. Only the extension's absence does that, which is why the
++    * shim is advertised only for a host that imports dma-bufs (vkr_dma_buf_importer).
+     */
+    if (physical_dev->dma_buf_shim_active &&
+        args->pExternalBufferInfo->handleType ==
+@@ -1163,8 +1129,6 @@ vkr_dispatch_vkGetPhysicalDeviceExternalBufferProperties(
+       *args->pExternalBufferProperties = host_props;
+       VkExternalMemoryProperties *emp =
+          &args->pExternalBufferProperties->externalMemoryProperties;
+-      /* Clear EXPORTABLE_BIT — Vulkan-backed memory can't be sampled by the
+-       * host GL compositor on Windows, so callers MUST NOT expect export. */
+       emp->externalMemoryFeatures &= ~VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
+       emp->exportFromImportedHandleTypes = 0;
+       if (emp->compatibleHandleTypes &
+diff --git a/src/venus/vkr_renderer.c b/src/venus/vkr_renderer.c
+--- a/src/venus/vkr_renderer.c
++++ b/src/venus/vkr_renderer.c
+@@ -20,6 +20,8 @@ struct vkr_renderer_state {
+ 
+ struct vkr_renderer_state vkr_state;
+ 
++bool vkr_dma_buf_importer;
++
+ size_t
+ vkr_get_capset(void *capset, uint32_t flags)
+ {
+@@ -75,6 +77,7 @@ vkr_renderer_init(uint32_t flags, const struct vkr_renderer_callbacks *cbs)
+ 
+    vkr_state.cbs = cbs;
+    list_inithead(&vkr_state.contexts);
++   vkr_dma_buf_importer = flags & VKR_RENDERER_DMA_BUF_IMPORTER;
+ 
+    return true;
+ }
+diff --git a/src/venus/vkr_renderer.h b/src/venus/vkr_renderer.h
+--- a/src/venus/vkr_renderer.h
++++ b/src/venus/vkr_renderer.h
+@@ -16,6 +16,8 @@
+ 
+ #define VKR_RENDERER_THREAD_SYNC (1u << 0)
+ #define VKR_RENDERER_ASYNC_FENCE_CB (1u << 1)
++/* the host GL renderer imports the dma-bufs Venus exports */
++#define VKR_RENDERER_DMA_BUF_IMPORTER (1u << 2)
+ 
+ typedef void (*vkr_renderer_retire_fence_callback_type)(uint32_t ctx_id,
+                                                         uint32_t ring_idx,
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -975,7 +975,8 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
+    }
+ 
+    if (!state.proxy_initialized && (flags & VIRGL_RENDERER_RENDER_SERVER)) {
+-      ret = proxy_renderer_init(&proxy_cbs, flags | VIRGL_RENDERER_NO_VIRGL);
++      ret = proxy_renderer_init(&proxy_cbs, flags | VIRGL_RENDERER_NO_VIRGL,
++                                state.vrend_initialized && vrend_renderer_imports_dma_buf());
+       if (ret) {
+          virgl_error("failed to initialize venus renderer");
+          goto fail;
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -13398,6 +13398,29 @@ struct pipe_resource *vrend_get_blob_pipe(struct vrend_context *ctx, uint64_t bl
+    return NULL;
+ }
+ 
++/* Whether vrend_renderer_pipe_resource_set_type below has a route that imports a dma-buf:
++ * with EGL, an EGLImage, which needs GBM; without EGL, a GL memory object. Windows builds
++ * never have GBM (meson.build), so there an EGL-backed vrend imports none.
++ */
++bool
++vrend_renderer_imports_dma_buf(void)
++{
++#ifdef HAVE_EPOXY_EGL_H
++   if (egl) {
++#ifdef ENABLE_GBM
++      return true;
++#else
++      return false;
++#endif
++   }
++#endif
++#ifdef _WIN32
++   return has_feature(feat_memory_object) && has_feature(feat_memory_object_win32);
++#else
++   return has_feature(feat_memory_object) && has_feature(feat_memory_object_fd);
++#endif
++}
++
+ int
+ vrend_renderer_pipe_resource_set_type(struct vrend_context *ctx,
+                                       uint32_t res_id,
+diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
+--- a/src/vrend/vrend_renderer.h
++++ b/src/vrend/vrend_renderer.h
+@@ -623,6 +623,9 @@ vrend_renderer_pipe_resource_create(struct vrend_context *ctx, uint32_t blob_id,
+ 
+ struct pipe_resource *vrend_get_blob_pipe(struct vrend_context *ctx, uint64_t blob_id);
+ 
++bool
++vrend_renderer_imports_dma_buf(void);
++
+ int
+ vrend_renderer_pipe_resource_set_type(struct vrend_context *ctx,
+                                       uint32_t res_id,
