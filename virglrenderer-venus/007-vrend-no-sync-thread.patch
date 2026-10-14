@@ -1,0 +1,19 @@
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -942,8 +942,15 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
+          goto fail;
+       }
+ 
++#ifndef _WIN32
++      /* Not on Windows: vrend's sync thread waits on fences in its own shared GL context, and
++       * on ANGLE (D3D11) a second context driven from another thread loses the device
++       * (EGL_CONTEXT_LOST). vrend then retires fences from virgl_renderer_poll on the main
++       * thread. Venus keeps THREAD_SYNC: its proxy fences need no GL.
++       */
+       if (flags & VIRGL_RENDERER_THREAD_SYNC)
+          renderer_flags |= VREND_USE_THREAD_SYNC;
++#endif
+       if (flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
+          renderer_flags |= VREND_USE_ASYNC_FENCE_CB;
+       if (flags & VIRGL_RENDERER_USE_EXTERNAL_BLOB)
