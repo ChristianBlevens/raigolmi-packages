@@ -1,0 +1,124 @@
+--- a/src/proxy/proxy_server.c
++++ b/src/proxy/proxy_server.c
+@@ -7,6 +7,7 @@
+ 
+ #ifdef _WIN32
+ #include <windows.h>
++#include <winsock2.h>
+ #include <errno.h>
+ #include <io.h>
+ #include "mman_win32.h"
+@@ -299,7 +300,19 @@ server_context_worker_thread(void *arg)
+          }
+ 
+          w->shmem_fd = fds[0];
+-         w->fence_eventfd = (fd_count >= 2) ? fds[1] : -1;
++         /* The worker signals its own copy of the client's fence event: the client closes
++          * its handle when its context is destroyed, before this worker is torn down. */
++         if (fd_count >= 2) {
++            HANDLE event;
++            if (!DuplicateHandle(GetCurrentProcess(), eventfd_handle(fds[1]),
++                                 GetCurrentProcess(), &event, 0, FALSE,
++                                 DUPLICATE_SAME_ACCESS)) {
++               proxy_log("server worker %u: INIT: duplicating fence event failed: error %lu",
++                         w->ctx_id, GetLastError());
++               goto done;
++            }
++            w->fence_eventfd = HandleToLong(event);
++         }
+          w->shmem_size = init_shmem_size;
+          w->timeline_count = (int)(init_shmem_size / sizeof(atomic_uint));
+ 
+@@ -491,22 +504,46 @@ done:
+    if (w->shmem_ptr)
+       UnmapViewOfFile(w->shmem_ptr);
+ 
+-   closesocket((SOCKET)w->socket_fd);
+    return 0;
+ }
+ 
++/*
++ * Tears down a worker already unlinked from state->workers. The join runs without
++ * workers_mutex: the worker's context teardown retires fences through
++ * server_retire_fence_cb, which takes it. The socket and fence event are closed only after
++ * the join, so their values cannot be reused while the worker or that callback holds them.
++ */
+ static void
+-server_destroy_worker(struct server_thread_state *state,
+-                      struct server_context_worker *w)
++server_destroy_worker(struct server_context_worker *w)
+ {
+-   /* Close our end; worker thread will exit when recv fails */
+-   closesocket((SOCKET)w->socket_fd);
++   /* Ends the worker's recv. */
++   shutdown((SOCKET)w->socket_fd, SD_BOTH);
+    thrd_join(w->thread, NULL);
+ 
+-   list_del(&w->head);
++   closesocket((SOCKET)w->socket_fd);
++   if (w->fence_eventfd >= 0)
++      close_eventfd(w->fence_eventfd);
+    free(w);
+ }
+ 
++static void
++server_destroy_all_workers(struct server_thread_state *state)
++{
++   while (true) {
++      mtx_lock(&state->workers_mutex);
++      struct server_context_worker *w = NULL;
++      if (!list_is_empty(&state->workers)) {
++         w = list_first_entry(&state->workers, struct server_context_worker, head);
++         list_del(&w->head);
++      }
++      mtx_unlock(&state->workers_mutex);
++
++      if (!w)
++         break;
++      server_destroy_worker(w);
++   }
++}
++
+ /*
+  * Server main thread — handles client protocol messages.
+  *
+@@ -602,19 +639,17 @@ server_main_thread(void *arg)
+          mtx_lock(&state->workers_mutex);
+          struct server_context_worker *w = server_find_worker(state, ctx_id);
+          if (w)
+-            server_destroy_worker(state, w);
++            list_del(&w->head);
+          mtx_unlock(&state->workers_mutex);
++
++         if (w)
++            server_destroy_worker(w);
+          break;
+       }
+ 
+-      case RENDER_CLIENT_OP_RESET: {
+-         mtx_lock(&state->workers_mutex);
+-         list_for_each_entry_safe(struct server_context_worker, w,
+-                                  &state->workers, head)
+-            server_destroy_worker(state, w);
+-         mtx_unlock(&state->workers_mutex);
++      case RENDER_CLIENT_OP_RESET:
++         server_destroy_all_workers(state);
+          break;
+-      }
+ 
+       case RENDER_CLIENT_OP_NOP:
+          break;
+@@ -628,12 +663,7 @@ server_main_thread(void *arg)
+ done:
+    proxy_log("server thread: exiting");
+ 
+-   /* Clean up remaining workers */
+-   mtx_lock(&state->workers_mutex);
+-   list_for_each_entry_safe(struct server_context_worker, w,
+-                            &state->workers, head)
+-      server_destroy_worker(state, w);
+-   mtx_unlock(&state->workers_mutex);
++   server_destroy_all_workers(state);
+ 
+    if (state->vkr_initialized)
+       vkr_renderer_fini();

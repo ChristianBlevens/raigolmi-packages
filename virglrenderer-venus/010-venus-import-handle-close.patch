@@ -1,0 +1,29 @@
+--- a/src/venus/vkr_allocator.c
++++ b/src/venus/vkr_allocator.c
+@@ -180,6 +180,11 @@ vkr_allocator_allocate_memory(struct virgl_resource *res)
+       return NULL;
+    }
+ 
++#ifdef _WIN32
++   /* Importing a Win32 handle does not take ownership of it; the memory holds its own
++    * reference, and an open handle would pin the allocation until the process exits. */
++   CloseHandle(dup_handle);
++#endif
+    os_close_fd(fd);
+ 
+    struct vkr_opaque_fd_mem_info *mem_info = calloc(1, sizeof(*mem_info));
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -506,6 +506,12 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+       return;
+    }
+ 
++#ifdef _WIN32
++   /* Importing a Win32 handle does not take ownership of it, unlike an fd. */
++   if (local_import_win32_info.handle != INVALID_HANDLE_VALUE)
++      CloseHandle(local_import_win32_info.handle);
++#endif
++
+    mem->device = dev;
+    mem->might_export = might_export;
+    mem->property_flags = property_flags;

@@ -13,7 +13,7 @@ _commit=e80354b8f5a0dedc62374b905a181874682659cc
 # release's share/qemu and DLLs, so the package depends on exactly it.
 _qemu=11.1.1-3.1
 pkgver=1.3.0.e80354b8
-pkgrel=6
+pkgrel=7
 pkgdesc='virglrenderer with Venus from the winq-emu fork, and the patched QEMU that loads it, for RaiGolmi (mingw-w64)'
 arch=('any')
 mingw_arch=('ucrt64')
@@ -43,7 +43,9 @@ source=("virglrenderer::git+https://github.com/cmspam/winq-emu-virglrenderer.git
         006-cursor-top-down.patch
         007-vrend-no-sync-thread.patch
         008-dma-buf-shim-needs-importer.patch
-        009-proxy-failed-blob-reply.patch)
+        009-proxy-failed-blob-reply.patch
+        010-venus-import-handle-close.patch
+        011-proxy-worker-teardown.patch)
 sha256sums=('SKIP'
             '47549307b46275c7ce75f92b57e20b10c9f32d127e31ec156181fa55ee72c88c'
             '234e25bdbc7bd40aad1af995d2186cf019ea48e6d3e4bbc3473efa0fc67d039c'
@@ -53,7 +55,9 @@ sha256sums=('SKIP'
             'a632b86440025cd8de5517436184c4605a80b5c476d3b995884599809a1672aa'
             '9ede92204c814fd42e1fbf7c0842acf457e73f3b9882f7c7f38e850e1af49bcf'
             '3ff2b312b5784e22fb8075a42c947a533d0d4d642abd0e22b3f5bb97abf784b2'
-            '2d44e14a8a2b3578fdcbefe164f9d0c163d518dae104dbf66b4f713c7126e80c')
+            '2d44e14a8a2b3578fdcbefe164f9d0c163d518dae104dbf66b4f713c7126e80c'
+            'b76d3995310107082c981a9fc881bc340ee9ba6d3752c8eaa2353d63bb89f6bc'
+            'd81af6cfb58b026ce5b796f29ce745340982fc1c0405500582f8905d44ce4c17')
 noextract=("${MINGW_PACKAGE_PREFIX}-qemu-${_qemu}-any.pkg.tar.zst")
 
 # MSYS2's 002-no-ioccom.patch is not here: the fork's drm.h has its own _WIN32 branch.
@@ -67,6 +71,8 @@ prepare() {
   patch -Nbp1 -i "${srcdir}/007-vrend-no-sync-thread.patch"
   patch -Nbp1 -i "${srcdir}/008-dma-buf-shim-needs-importer.patch"
   patch -Nbp1 -i "${srcdir}/009-proxy-failed-blob-reply.patch"
+  patch -Nbp1 -i "${srcdir}/010-venus-import-handle-close.patch"
+  patch -Nbp1 -i "${srcdir}/011-proxy-worker-teardown.patch"
 }
 
 build() {

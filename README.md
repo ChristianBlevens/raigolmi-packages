@@ -28,7 +28,7 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   starts, and most of its failures return without a word; with the patch the server keeps
   writing to the log QEMU's process already has (`VIRGL_LOG_FILE`), and each failure on the
   way from context creation to a blob names itself and its Windows error, a refused memory
-  allocation with its size, type and result. Five more repair the fork: `005-eventfd-handle.patch` keeps its Windows eventfd as an event's handle value, since
+  allocation with its size, type and result. Seven more repair the fork: `005-eventfd-handle.patch` keeps its Windows eventfd as an event's handle value, since
   the CRT cannot wrap an event in an fd and every Venus context failed to create its fence
   eventfd; `006-cursor-top-down.patch` turns every cursor over as virglrenderer 1.3.0 does,
   where the fork left non-`y_0_top` cursors upside down; `007-vrend-no-sync-thread.patch` keeps
@@ -39,7 +39,15 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   Vulkan window as a dma-buf, the compositor's import fails, and its context stops for good,
   freezing the screen; `009-proxy-failed-blob-reply.patch` sends the fd count a failed blob's
   reply lacked, so the guest's map fails where QEMU's main loop used to wait on it for good
-  (a host allocation the GPU refused hung the whole machine). The fork changes the OpenGL path as well,
+  (a host allocation the GPU refused hung the whole machine); `010-venus-import-handle-close.patch`
+  closes the Windows handle each imported allocation leaves open, which a Vulkan import does not
+  take over, so mapped and freed memory goes back to the GPU instead of piling up until it is out
+  of memory; `011-proxy-worker-teardown.patch` closes a destroyed context's socket and fence event
+  once, after its worker has stopped, where the server closed the socket twice and kept signalling
+  an event the context had already closed, either of which could land on a handle reused by then,
+  and waits for that worker without holding the lock its fence callback takes, where a fence
+  retiring during the teardown deadlocked the server.
+  The fork changes the OpenGL path as well,
   so it never replaces the default DLL: the package installs it into `/ucrt64/raigolmi-venus/`
   beside an unchanged copy of the patched QEMU's `qemu-system-x86_64w.exe`, and that copy loads
   the DLL beside it while `/ucrt64/bin` keeps the default one. RaiGolmi starts that copy only
