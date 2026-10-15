@@ -1,0 +1,38 @@
+--- a/src/proxy/proxy_server.c
++++ b/src/proxy/proxy_server.c
+@@ -158,12 +158,6 @@
+ }
+ 
+ static bool
+-server_send_reply(int fd, const void *data, size_t size)
+-{
+-   return server_send_all(fd, data, size);
+-}
+-
+-static bool
+ server_send_reply_with_fds(int fd, const void *data, size_t size,
+                            const int *fds, int fd_count)
+ {
+@@ -428,7 +422,9 @@
+             proxy_log("server worker %u: create resource %u (blob %" PRIu64 ") failed",
+                       w->ctx_id, res_id, blob_id);
+             reply.fd_type = VIRGL_RESOURCE_FD_INVALID;
+-            server_send_reply(w->socket_fd, &reply, sizeof(reply));
++            /* The client always reads an fd count after the reply; a reply without one
++             * leaves it blocked in recv on QEMU's main thread for good. */
++            server_send_reply_with_fds(w->socket_fd, &reply, sizeof(reply), NULL, 0);
+          } else {
+             server_send_reply_with_fds(w->socket_fd, &reply, sizeof(reply),
+                                        &res_fd, 1);
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -491,6 +491,9 @@
+ 
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
++      vkr_log("vkAllocateMemory of %" PRIu64 " bytes from type %u failed: %d",
++              (uint64_t)args->pAllocateInfo->allocationSize,
++              args->pAllocateInfo->memoryTypeIndex, args->ret);
+       if (local_import_info.fd >= 0)
+          os_close_fd(local_import_info.fd);
+ #ifdef _WIN32

@@ -27,8 +27,8 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   the fork's in-process render server discards everything virglrenderer logs once Venus
   starts, and most of its failures return without a word; with the patch the server keeps
   writing to the log QEMU's process already has (`VIRGL_LOG_FILE`), and each failure on the
-  way from context creation to a blob names itself and its Windows error. Four more repair the
-  fork: `005-eventfd-handle.patch` keeps its Windows eventfd as an event's handle value, since
+  way from context creation to a blob names itself and its Windows error, a refused memory
+  allocation with its size, type and result. Five more repair the fork: `005-eventfd-handle.patch` keeps its Windows eventfd as an event's handle value, since
   the CRT cannot wrap an event in an fd and every Venus context failed to create its fence
   eventfd; `006-cursor-top-down.patch` turns every cursor over as virglrenderer 1.3.0 does,
   where the fork left non-`y_0_top` cursors upside down; `007-vrend-no-sync-thread.patch` keeps
@@ -37,7 +37,9 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   offers the guest the fork's dma-buf extensions only when the host's OpenGL side can import the
   dma-bufs they produce, which no Windows build with EGL can: with them, Mesa presents every
   Vulkan window as a dma-buf, the compositor's import fails, and its context stops for good,
-  freezing the screen. The fork changes the OpenGL path as well,
+  freezing the screen; `009-proxy-failed-blob-reply.patch` sends the fd count a failed blob's
+  reply lacked, so the guest's map fails where QEMU's main loop used to wait on it for good
+  (a host allocation the GPU refused hung the whole machine). The fork changes the OpenGL path as well,
   so it never replaces the default DLL: the package installs it into `/ucrt64/raigolmi-venus/`
   beside an unchanged copy of the patched QEMU's `qemu-system-x86_64w.exe`, and that copy loads
   the DLL beside it while `/ucrt64/bin` keeps the default one. RaiGolmi starts that copy only
