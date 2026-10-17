@@ -16,6 +16,13 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
 - **QEMU** (`qemu/004-file-win32-discard.patch`): QEMU's Windows file driver has no discard,
   so whatever the guest frees stays in the disk image and the file only ever grows. With the
   patch the image is sparse, and a discard gives its range back in place.
+  `qemu/005-whpx-cpuid-xsave-size.patch`: under WHPX, QEMU answers the guest's CPUID leaf
+  0xD with the XSAVE size for the XCR0 the guest started with, not the one it has set. A
+  guest kernel on a CPU without XSAVEC (Intel before Skylake) reads that size, finds it
+  disagrees with its own sum, and turns XSAVE off, and Linux 7.2's path for that overwrites
+  the first task's credentials, so every exec fails and the kernel panics with "No working
+  init found". With the patch the size is the hypervisor's own, as QEMU already does for
+  the leaf's other XCR0-dependent values.
 - **virglrenderer** (`virglrenderer/003-d3d11-texture-optional.patch`): without it,
   virglrenderer refuses a scanout that has no D3D11 texture, like the boot console and the
   shutdown screen, and the window says "Display output is not active". With it QEMU hands
