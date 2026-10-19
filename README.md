@@ -27,6 +27,12 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   default recording device when it starts, even when told to have no input voices, and
   exits when the PC has none, so a PC with speakers but no microphone could have no sound
   at all. With the patch, `in.voices=0` leaves recording unopened.
+  `qemu/007-virgl-map-blob-off-main-loop.patch`: QEMU maps a Venus blob for the guest on its
+  main loop, and on Windows that map takes tens of milliseconds, about once a second while a
+  game runs; every timer on the loop stops meanwhile, the sound card's among them, so the
+  guest's sound breaks up. With the patch a Venus blob is mapped on a thread of its own while
+  only the GPU's command queue waits; a GL blob, whose map needs the main loop's GL context,
+  still maps there.
 - **virglrenderer** (`virglrenderer/003-d3d11-texture-optional.patch`): without it,
   virglrenderer refuses a scanout that has no D3D11 texture, like the boot console and the
   shutdown screen, and the window says "Display output is not active". With it QEMU hands
