@@ -23,6 +23,10 @@ stock packages. You don't need to touch this repo to use RaiGolmi.
   the first task's credentials, so every exec fails and the kernel panics with "No working
   init found". With the patch the size is the hypervisor's own, as QEMU already does for
   the leaf's other XCR0-dependent values.
+  `qemu/006-dsound-capture-only-with-input.patch`: QEMU's DirectSound audio opens Windows'
+  default recording device when it starts, even when told to have no input voices, and
+  exits when the PC has none, so a PC with speakers but no microphone could have no sound
+  at all. With the patch, `in.voices=0` leaves recording unopened.
 - **virglrenderer** (`virglrenderer/003-d3d11-texture-optional.patch`): without it,
   virglrenderer refuses a scanout that has no D3D11 texture, like the boot console and the
   shutdown screen, and the window says "Display output is not active". With it QEMU hands

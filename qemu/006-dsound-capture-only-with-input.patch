@@ -1,0 +1,46 @@
+--- a/audio/dsoundaudio.c
++++ b/audio/dsoundaudio.c
+@@ -610,22 +610,28 @@
+         return false;
+     }
+ 
+-    hr = CoCreateInstance (
+-        &CLSID_DirectSoundCapture,
+-        NULL,
+-        CLSCTX_ALL,
+-        &IID_IDirectSoundCapture,
+-        (void **) &s->dsound_capture
+-        );
+-    if (FAILED (hr)) {
+-        dserror_set(errp, hr, "Could not create DirectSoundCapture instance");
+-        return false;
+-    }
++    /*
++     * Without input voices nothing records, so a host with no recording
++     * device can still play.
++     */
++    if (AUDIO_MIXENG_BACKEND(abe)->nb_hw_voices_in) {
++        hr = CoCreateInstance (
++            &CLSID_DirectSoundCapture,
++            NULL,
++            CLSCTX_ALL,
++            &IID_IDirectSoundCapture,
++            (void **) &s->dsound_capture
++            );
++        if (FAILED (hr)) {
++            dserror_set(errp, hr, "Could not create DirectSoundCapture instance");
++            return false;
++        }
+ 
+-    hr = IDirectSoundCapture_Initialize (s->dsound_capture, NULL);
+-    if (FAILED(hr)) {
+-        dserror_set(errp, hr, "Could not initialize DirectSoundCapture");
+-        return false;
++        hr = IDirectSoundCapture_Initialize (s->dsound_capture, NULL);
++        if (FAILED(hr)) {
++            dserror_set(errp, hr, "Could not initialize DirectSoundCapture");
++            return false;
++        }
+     }
+ 
+     hr = IDirectSound_SetCooperativeLevel (
