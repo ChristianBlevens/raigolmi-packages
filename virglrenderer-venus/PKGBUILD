@@ -11,9 +11,9 @@ pkgname=${MINGW_PACKAGE_PREFIX}-${_realname}
 _commit=e80354b8f5a0dedc62374b905a181874682659cc
 # The QEMU release whose qemu-system-x86_64w.exe this package carries; the exe needs that
 # release's share/qemu and DLLs, so the package depends on exactly it.
-_qemu=11.1.1-3.3
+_qemu=11.1.1-3.4
 pkgver=1.3.0.e80354b8
-pkgrel=9
+pkgrel=10
 pkgdesc='virglrenderer with Venus from the winq-emu fork, and the patched QEMU that loads it, for RaiGolmi (mingw-w64)'
 arch=('any')
 mingw_arch=('ucrt64')
@@ -47,7 +47,7 @@ source=("virglrenderer::git+https://github.com/cmspam/winq-emu-virglrenderer.git
         010-venus-import-handle-close.patch
         011-proxy-worker-teardown.patch)
 sha256sums=('SKIP'
-            'b16f5a16d0a0e0248d51d77ac1b2bea1452f222b99acfc8c34a558fe69694f2e'
+            '772ebea5811df0dd0a723100de715790afe3e326b6c08b217ad0cdb9af1187db'
             '234e25bdbc7bd40aad1af995d2186cf019ea48e6d3e4bbc3473efa0fc67d039c'
             '3be48b5da58399eb545b18f09bfe3e58010576a4f7259fee98b693314ec08dbd'
             'f90506db6276a312c36fe1665899334b358fc0852267f85217e6e1d6d4753dca'
